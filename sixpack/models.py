@@ -6,8 +6,9 @@ import random
 import re
 import redis
 
-from config import CONFIG as cfg
-from db import _key, msetbit, sequential_id, first_key_with_bit_set
+from .config import CONFIG as cfg
+from .db import _key, msetbit, sequential_id, first_key_with_bit_set
+from .utils import decode_if_bytes
 
 # This is pretty restrictive, but we can always relax it later.
 VALID_EXPERIMENT_ALTERNATIVE_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]*$", re.I)
@@ -74,11 +75,11 @@ class Experiment(object):
         return objectified
 
     def initialize_alternatives(self, alternatives):
-        for alternative_name in alternatives:
+        decoded_alternatives = [decode_if_bytes(alternative) for alternative in alternatives]
+        for alternative_name in decoded_alternatives:
             if not Alternative.is_valid(alternative_name):
                 raise ValueError('invalid alternative name')
-
-        return [Alternative(n, self, redis=self.redis) for n in alternatives]
+        return [Alternative(n, self, redis=self.redis) for n in decoded_alternatives]
 
     def save(self):
         pipe = self.redis.pipeline()
@@ -109,7 +110,7 @@ class Experiment(object):
     def created_at(self):
         # Note: the split here is to correctly format legacy dates
         try:
-            return self.redis.hget(self.key(), 'created_at').split('.')[0]
+            return self.redis.hget(self.key(), 'created_at').decode('utf-8').split('.')[0]
         except (AttributeError) as e:
             return None
 
@@ -325,7 +326,7 @@ class Experiment(object):
           1. An existing alternative
           2. A server-chosen alternative
         """
-
+        print("getting alternative")
         if self.is_archived() or self.is_paused():
             return self.control
 
@@ -333,6 +334,7 @@ class Experiment(object):
             return self.control
 
         chosen_alternative = self.existing_alternative(client)
+        print("chosen alternative", chosen_alternative)
         if not chosen_alternative:
             chosen_alternative, participate = self.choose_alternative(client)
             if participate and not prefetch:
@@ -357,10 +359,13 @@ class Experiment(object):
             return None
 
         alts = self.get_alternative_names()
+        print("experiment alts", alts)
         keys = [_key("p:{0}:{1}:all".format(self.name, alt)) for alt in alts]
+        print("keys", keys)
         altkey = first_key_with_bit_set(keys=keys, args=[self.sequential_id(client)])
+        print("altkey", altkey)
         if altkey:
-            idx = keys.index(altkey)
+            idx = keys.index(decode_if_bytes(altkey))
             return Alternative(alts[idx], self, redis=self.redis)
 
         return None
@@ -379,12 +384,14 @@ class Experiment(object):
         return self.alternatives[idx]
 
     def _get_hash(self, client):
-        salty = "{0}.{1}".format(self.name, client.client_id)
+        print(self.name, client.client_id)
+        salty = ("{0}.{1}".format(self.name, client.client_id)).encode('utf-8')
 
         # We're going to take the first 7 bytes of the client UUID
         # because of the largest integer values that can be represented safely
         # with Sixpack client libraries
         # More Info: https://github.com/seatgeek/sixpack/issues/132#issuecomment-54318218
+        print(salty)
         hashed = sha1(salty).hexdigest()[:7]
         return int(hashed, 16)
 
@@ -416,13 +423,13 @@ class Experiment(object):
 
         if not redis.sismember(_key("e"), experiment_name):
             raise ValueError('experiment does not exist')
-
+        
         return cls(experiment_name,
                    Experiment.load_alternatives(experiment_name, redis),
                    redis=redis)
 
     @classmethod
-    def find_or_create(cls, experiment_name, alternatives,
+    def create(cls, experiment_name, alternatives,
         traffic_fraction=None,
         redis=None):
 
@@ -434,21 +441,16 @@ class Experiment(object):
         if traffic_fraction is None:
             traffic_fraction = 1
 
-        is_update = False
-        try:
-            experiment = Experiment.find(experiment_name, redis=redis)
-            is_update = True
-        except ValueError:
-            experiment = cls(experiment_name, alternatives, redis=redis)
-            # TODO: I want to revisit this later.
-            experiment.set_traffic_fraction(traffic_fraction)
-            experiment.save()
+        experiment = cls(experiment_name, alternatives, redis=redis)
+        # TODO: I want to revisit this later.
+        experiment.set_traffic_fraction(traffic_fraction)
+        experiment.save()
 
         # Only check traffic fraction if the experiment is being updated 
         # and the traffic fraction actually changes.
-        if is_update and experiment.traffic_fraction != traffic_fraction:
-            experiment.set_traffic_fraction(traffic_fraction)
-            experiment.save()
+        # if experiment.traffic_fraction != traffic_fraction:
+        #     experiment.set_traffic_fraction(traffic_fraction)
+        #     experiment.save()
 
         # Make sure the alternative options are correct. If they are not,
         # raise an error.
@@ -492,12 +494,12 @@ class Experiment(object):
 
     @staticmethod
     def is_valid(experiment_name):
-        return (isinstance(experiment_name, basestring) and
+        return (isinstance(experiment_name, str) and
                 VALID_EXPERIMENT_ALTERNATIVE_RE.match(experiment_name) is not None)
 
     @staticmethod
     def validate_kpi(kpi):
-        return (isinstance(kpi, basestring) and
+        return (isinstance(kpi, str) and
                 VALID_KPI_RE.match(kpi) is not None)
 
 
@@ -514,6 +516,7 @@ class Alternative(object):
     def objectify_by_period(self, period, slim=False):
 
         if slim:
+            # return self.name.decode('utf-8')
             return self.name
 
         PERIOD_TO_METHOD_MAP = {
@@ -804,8 +807,15 @@ class Alternative(object):
 
     def key(self):
         return _key("{0}:{1}".format(self.experiment.name, self.name))
+    
+    @staticmethod
+    def decode_if_bytes(data):
+        if isinstance(data, bytes):
+            return data.decode('utf-8')
+        else:
+            return data
 
     @staticmethod
     def is_valid(alternative_name):
-        return (isinstance(alternative_name, basestring) and
+        return (isinstance(alternative_name, str) and
                 VALID_EXPERIMENT_ALTERNATIVE_RE.match(alternative_name) is not None)

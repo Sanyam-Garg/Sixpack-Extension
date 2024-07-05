@@ -2,7 +2,7 @@ import os
 import re
 from socket import inet_aton
 import sys
-from urllib import unquote
+from urllib.parse import unquote
 
 import dateutil.parser
 from redis import ConnectionError
@@ -11,21 +11,21 @@ from werkzeug.routing import Map, Rule
 from werkzeug.exceptions import HTTPException, NotFound
 from werkzeug.datastructures import Headers
 
-from . import __version__
-from api import participate, convert
+__version__ = '2.7'
+from .api import participate, convert, create
 
-from config import CONFIG as cfg
-from metrics import init_statsd
-from utils import to_bool
+from .config import CONFIG as cfg
+from .metrics import init_statsd
+from .utils import to_bool, decode_if_bytes
 
 try:
-    import db
+    from . import db
 except ConnectionError:
-    print "Redis is currently unavailable or misconfigured"
+    print("Redis is currently unavailable or misconfigured")
     sys.exit()
 
-from models import Experiment, Client
-from utils import service_unavailable_on_connection_error, json_error, json_success
+from .models import Experiment, Client, Alternative
+from .utils import service_unavailable_on_connection_error, json_error, json_success
 
 
 class CORSMiddleware(object):
@@ -62,7 +62,7 @@ class CORSMiddleware(object):
                         cfg.get("cors_methods"))
             headers.add("Access-Control-Expose-Headers",
                         cfg.get("cors_expose_headers"))
-            return start_response(status, headers.to_list(), exc_info)
+            return start_response(status, headers._list, exc_info)
 
         if environ.get("REQUEST_METHOD") == "OPTIONS":
             add_cors_headers("200 Ok", [("Content-Type", "text/plain")])
@@ -84,6 +84,7 @@ class Sixpack(object):
             Rule('/_status', endpoint='status'),
             Rule('/participate', endpoint='participate'),
             Rule('/convert', endpoint='convert'),
+            Rule('/create-experiment', endpoint='create_experiment'),
             Rule('/experiments/<name>', endpoint='experiment_details'),
             Rule('/favicon.ico', endpoint='favicon')
         ])
@@ -192,6 +193,26 @@ class Sixpack(object):
         return json_success(resp, request)
 
     @service_unavailable_on_connection_error
+    def on_create_experiment(self, request):
+        alts = request.args.getlist('alternatives')
+        experiment_name = request.args.get('experiment')
+        traffic_fraction = request.args.get('traffic_fraction')
+
+        if traffic_fraction is not None:
+            traffic_fraction = float(traffic_fraction)
+
+        if experiment_name is None or alts is None:
+            # TODO: return what args are missing
+            return json_error({'message': 'missing arguments'}, request, 400)
+
+        try:
+            exp = create(experiment_name, alts, traffic_fraction, self.redis)
+        except ValueError as e:
+            return json_error({'message': str(e)}, request, 400)
+        
+        return json_success(exp.objectify_by_period('day', True), request)
+
+    @service_unavailable_on_connection_error
     def on_participate(self, request):
         alts = request.args.getlist('alternatives')
         experiment_name = request.args.get('experiment')
@@ -204,7 +225,8 @@ class Sixpack(object):
             traffic_fraction = float(traffic_fraction)
         prefetch = to_bool(request.args.get('prefetch', 'false'))
 
-        if client_id is None or experiment_name is None or alts is None:
+        if client_id is None or experiment_name is None:
+            # TODO: return what args are missing
             return json_error({'message': 'missing arguments'}, request, 400)
 
         dt = None
@@ -220,14 +242,13 @@ class Sixpack(object):
             else:
                 alt = participate(experiment_name, alts, client_id,
                                   force=force, record_force=record_force,
-                                  traffic_fraction=traffic_fraction,
                                   prefetch=prefetch, datetime=dt, redis=self.redis)
         except ValueError as e:
             return json_error({'message': str(e)}, request, 400)
 
         resp = {
             'alternative': {
-                'name': alt.name
+                'name': decode_if_bytes(alt.name)
             },
             'experiment': {
                 'name': alt.experiment.name,
@@ -240,9 +261,14 @@ class Sixpack(object):
 
     @service_unavailable_on_connection_error
     def on_experiment_details(self, request, name):
-        exp = Experiment.find(name, redis=self.redis)
+        exp = None
+        error = None
+        try:
+            exp = Experiment.find(name, redis=self.redis)
+        except ValueError as e:
+            error = e
         if exp is None:
-            return json_error({'message': 'experiment not found'}, request, 404)
+            return json_error({'message': 'experiment not found', 'error': str(error)}, request, 404)
 
         return json_success(exp.objectify_by_period('day', True), request)
 

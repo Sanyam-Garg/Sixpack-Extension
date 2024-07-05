@@ -5,7 +5,6 @@ import random
 
 from sixpack.sixpack import Session
 
-
 exp_name = "benchmark-test"
 exp_alternatives = ["default", "alt1", "alt2", "alt3"]
 participants = 10000
