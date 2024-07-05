@@ -1,10 +1,10 @@
 from datetime import datetime
 from hashlib import sha1
 from math import log
-import operator
 import random
 import re
 import redis
+import json
 
 from .config import CONFIG as cfg
 from .db import _key, msetbit, sequential_id, first_key_with_bit_set
@@ -75,11 +75,7 @@ class Experiment(object):
         return objectified
 
     def initialize_alternatives(self, alternatives):
-        decoded_alternatives = [decode_if_bytes(alternative) for alternative in alternatives]
-        for alternative_name in decoded_alternatives:
-            if not Alternative.is_valid(alternative_name):
-                raise ValueError('invalid alternative name')
-        return [Alternative(n, self, redis=self.redis) for n in decoded_alternatives]
+        return [Alternative(alternative_name, class_diffs, self, redis=self.redis) for alternative_name, class_diffs in alternatives.items()]
 
     def save(self):
         pipe = self.redis.pipeline()
@@ -92,7 +88,8 @@ class Experiment(object):
                 pipe.hset(self.key(), 'created_at', datetime.now().strftime("%Y-%m-%d %H:%M"))
                 # reverse here and use lpush to keep consistent with using lrange
                 for alternative in reversed(self.alternatives):
-                    pipe.lpush("{0}:alternatives".format(self.key()), alternative.name)
+                    # pipe.lpush("{0}:alternatives".format(self.key()), alternative.name)
+                    pipe.hset(f"{self.key()}:alternatives", alternative.name, alternative.flattened_class_diffs())
             pipe.hset(self.key(), 'traffic_fraction', self._traffic_fraction)
             pipe.execute()
         except redis.WatchError:
@@ -358,15 +355,15 @@ class Experiment(object):
         if self.is_client_excluded(client):
             return None
 
-        alts = self.get_alternative_names()
+        alts = self.alternatives
         print("experiment alts", alts)
-        keys = [_key("p:{0}:{1}:all".format(self.name, alt)) for alt in alts]
+        keys = [_key("p:{0}:{1}:all".format(self.name, alt.name)) for alt in alts]
         print("keys", keys)
         altkey = first_key_with_bit_set(keys=keys, args=[self.sequential_id(client)])
         print("altkey", altkey)
         if altkey:
             idx = keys.index(decode_if_bytes(altkey))
-            return Alternative(alts[idx], self, redis=self.redis)
+            return Alternative(alts[idx].name, alts[idx].class_diffs, self, redis=self.redis)
 
         return None
 
@@ -433,7 +430,7 @@ class Experiment(object):
         traffic_fraction=None,
         redis=None):
 
-        if len(alternatives) < 2:
+        if len(alternatives.keys()) < 2:
             raise ValueError('experiments require at least two alternatives')
 
         # Traffic fraction can change at any time, so it needs to be
@@ -454,8 +451,8 @@ class Experiment(object):
 
         # Make sure the alternative options are correct. If they are not,
         # raise an error.
-        if sorted(experiment.get_alternative_names()) != sorted(alternatives):
-            raise ValueError('experiment alternatives have changed. please delete in the admin')
+        # if sorted(experiment.get_alternative_names()) != sorted(alternatives):
+        #     raise ValueError('experiment alternatives have changed. please delete in the admin')
 
         return experiment
 
@@ -490,7 +487,13 @@ class Experiment(object):
     @staticmethod
     def load_alternatives(experiment_name, redis=None):
         key = _key("e:{0}:alternatives".format(experiment_name))
-        return redis.lrange(key, 0, -1)
+        alternatives = redis.hgetall(key)
+        decoded_alternatives = {}
+
+        for name, class_diffs in alternatives.items():
+            decoded_alternatives[decode_if_bytes(name)] = json.loads(decode_if_bytes(class_diffs))
+        
+        return decoded_alternatives
 
     @staticmethod
     def is_valid(experiment_name):
@@ -505,19 +508,23 @@ class Experiment(object):
 
 class Alternative(object):
 
-    def __init__(self, name, experiment, redis=None):
+    def __init__(self, name, class_diffs, experiment, redis=None):
         self.name = name
+        self.class_diffs = class_diffs
         self.experiment = experiment
         self.redis = redis
 
     def __repr__(self):
         return "<Alternative {0} (Experiment {1})>".format(repr(self.name), repr(self.experiment.name))
+    
+    def flattened_class_diffs(self):
+        return json.dumps(self.class_diffs)
 
     def objectify_by_period(self, period, slim=False):
 
         if slim:
             # return self.name.decode('utf-8')
-            return self.name
+            return {self.name: self.class_diffs}
 
         PERIOD_TO_METHOD_MAP = {
             'day': {
@@ -815,7 +822,7 @@ class Alternative(object):
         else:
             return data
 
-    @staticmethod
-    def is_valid(alternative_name):
-        return (isinstance(alternative_name, str) and
-                VALID_EXPERIMENT_ALTERNATIVE_RE.match(alternative_name) is not None)
+    # @staticmethod
+    # def is_valid(alternative_name):
+    #     return (isinstance(alternative_name, str) and
+    #             VALID_EXPERIMENT_ALTERNATIVE_RE.match(alternative_name) is not None)

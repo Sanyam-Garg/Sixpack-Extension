@@ -62,3 +62,6 @@ def decode_if_bytes(data: str) -> str:
         return data.decode('utf-8')
     else:
         return data
+
+def validate_required_args_and_get_body(required_args: list, request_body_json: dict) -> str:
+    pass

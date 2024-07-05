@@ -1,5 +1,4 @@
-import os
-import re
+import re, json
 from socket import inet_aton
 import sys
 from urllib.parse import unquote
@@ -194,9 +193,13 @@ class Sixpack(object):
 
     @service_unavailable_on_connection_error
     def on_create_experiment(self, request):
-        alts = request.args.getlist('alternatives')
-        experiment_name = request.args.get('experiment')
-        traffic_fraction = request.args.get('traffic_fraction')
+        body = request.get_data()
+        if not body:
+            return json_error({'message': 'request body cannot be empty'}, request, 400)
+        body = json.loads(body)
+        alts = body.get('alternatives', None)
+        experiment_name = body.get('name', None)
+        traffic_fraction = body.get('traffic_fraction', None)
 
         if traffic_fraction is not None:
             traffic_fraction = float(traffic_fraction)
@@ -247,9 +250,7 @@ class Sixpack(object):
             return json_error({'message': str(e)}, request, 400)
 
         resp = {
-            'alternative': {
-                'name': decode_if_bytes(alt.name)
-            },
+            'alternative': alt.objectify_by_period('day', slim=True),
             'experiment': {
                 'name': alt.experiment.name,
             },
