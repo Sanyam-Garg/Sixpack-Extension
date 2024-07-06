@@ -49,7 +49,7 @@ class Experiment(object):
         objectified = {
             'name': self.name,
             'period': period,
-            'alternatives': [],
+            'alternatives': {},
             'created_at': self.created_at,
             'traffic_fraction': self.traffic_fraction,
             'excluded_clients': self.excluded_clients(),
@@ -65,8 +65,8 @@ class Experiment(object):
         }
 
         for alternative in self.alternatives:
-            objectified_alt = alternative.objectify_by_period(period, slim)
-            objectified['alternatives'].append(objectified_alt)
+            name, variations = alternative.objectify_by_period(period, slim)
+            objectified['alternatives'][name] = variations
 
         if slim:
             for key in ['period', 'kpi', 'kpis', 'has_winner']:
@@ -75,7 +75,7 @@ class Experiment(object):
         return objectified
 
     def initialize_alternatives(self, alternatives):
-        return [Alternative(alternative_name, class_diffs, self, redis=self.redis) for alternative_name, class_diffs in alternatives.items()]
+        return [Alternative(alternative_name, variations, self, redis=self.redis) for alternative_name, variations in alternatives.items()]
 
     def save(self):
         pipe = self.redis.pipeline()
@@ -89,7 +89,7 @@ class Experiment(object):
                 # reverse here and use lpush to keep consistent with using lrange
                 for alternative in reversed(self.alternatives):
                     # pipe.lpush("{0}:alternatives".format(self.key()), alternative.name)
-                    pipe.hset(f"{self.key()}:alternatives", alternative.name, alternative.flattened_class_diffs())
+                    pipe.hset(f"{self.key()}:alternatives", alternative.name, alternative.flattened_variations())
             pipe.hset(self.key(), 'traffic_fraction', self._traffic_fraction)
             pipe.execute()
         except redis.WatchError:
@@ -363,7 +363,7 @@ class Experiment(object):
         print("altkey", altkey)
         if altkey:
             idx = keys.index(decode_if_bytes(altkey))
-            return Alternative(alts[idx].name, alts[idx].class_diffs, self, redis=self.redis)
+            return Alternative(alts[idx].name, alts[idx].variations, self, redis=self.redis)
 
         return None
 
@@ -381,7 +381,6 @@ class Experiment(object):
         return self.alternatives[idx]
 
     def _get_hash(self, client):
-        print(self.name, client.client_id)
         salty = ("{0}.{1}".format(self.name, client.client_id)).encode('utf-8')
 
         # We're going to take the first 7 bytes of the client UUID
@@ -490,8 +489,8 @@ class Experiment(object):
         alternatives = redis.hgetall(key)
         decoded_alternatives = {}
 
-        for name, class_diffs in alternatives.items():
-            decoded_alternatives[decode_if_bytes(name)] = json.loads(decode_if_bytes(class_diffs))
+        for name, variations in alternatives.items():
+            decoded_alternatives[decode_if_bytes(name)] = json.loads(decode_if_bytes(variations))
         
         return decoded_alternatives
 
@@ -508,23 +507,23 @@ class Experiment(object):
 
 class Alternative(object):
 
-    def __init__(self, name, class_diffs, experiment, redis=None):
+    def __init__(self, name, variations, experiment, redis=None):
         self.name = name
-        self.class_diffs = class_diffs
+        self.variations = variations
         self.experiment = experiment
         self.redis = redis
 
     def __repr__(self):
         return "<Alternative {0} (Experiment {1})>".format(repr(self.name), repr(self.experiment.name))
     
-    def flattened_class_diffs(self):
-        return json.dumps(self.class_diffs)
+    def flattened_variations(self):
+        return json.dumps(self.variations)
 
     def objectify_by_period(self, period, slim=False):
 
         if slim:
             # return self.name.decode('utf-8')
-            return {self.name: self.class_diffs}
+            return self.name, self.variations
 
         PERIOD_TO_METHOD_MAP = {
             'day': {

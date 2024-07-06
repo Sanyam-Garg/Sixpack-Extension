@@ -249,8 +249,9 @@ class Sixpack(object):
         except ValueError as e:
             return json_error({'message': str(e)}, request, 400)
 
+        alternative_name, variations = alt.objectify_by_period('day', slim=True)
         resp = {
-            'alternative': alt.objectify_by_period('day', slim=True),
+            'alternative': {alternative_name: variations},
             'experiment': {
                 'name': alt.experiment.name,
             },
