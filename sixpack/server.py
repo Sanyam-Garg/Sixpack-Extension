@@ -200,6 +200,7 @@ class Sixpack(object):
         alts = body.get('alternatives', None)
         experiment_name = body.get('name', None)
         traffic_fraction = body.get('traffic_fraction', None)
+        segmentation_rules = body.get('segmentation_rules', None)
 
         if traffic_fraction is not None:
             traffic_fraction = float(traffic_fraction)
@@ -209,7 +210,7 @@ class Sixpack(object):
             return json_error({'message': 'missing arguments'}, request, 400)
 
         try:
-            exp = create(experiment_name, alts, traffic_fraction, self.redis)
+            exp = create(experiment_name, alts, segmentation_rules, traffic_fraction, self.redis)
         except ValueError as e:
             return json_error({'message': str(e)}, request, 400)
         
@@ -222,10 +223,6 @@ class Sixpack(object):
         force = request.args.get('force')
         record_force = to_bool(request.args.get('record_force', 'false'))
         client_id = request.args.get('client_id')
-        traffic_fraction = request.args.get('traffic_fraction')
-
-        if traffic_fraction is not None:
-            traffic_fraction = float(traffic_fraction)
         prefetch = to_bool(request.args.get('prefetch', 'false'))
 
         if client_id is None or experiment_name is None:
@@ -245,7 +242,7 @@ class Sixpack(object):
             else:
                 alt = participate(experiment_name, alts, client_id,
                                   force=force, record_force=record_force,
-                                  prefetch=prefetch, datetime=dt, redis=self.redis)
+                                  prefetch=prefetch, datetime=dt, redis=self.redis, request=request)
         except ValueError as e:
             return json_error({'message': str(e)}, request, 400)
 

@@ -9,6 +9,7 @@ import json
 from .config import CONFIG as cfg
 from .db import _key, msetbit, sequential_id, first_key_with_bit_set
 from .utils import decode_if_bytes
+from .segmenters import SegmenterFactory
 
 # This is pretty restrictive, but we can always relax it later.
 VALID_EXPERIMENT_ALTERNATIVE_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]*$", re.I)
@@ -24,7 +25,7 @@ class Client(object):
 
 class Experiment(object):
 
-    def __init__(self, name, alternatives,
+    def __init__(self, name, alternatives, segmentation_rules,
         winner=False,
         traffic_fraction=False,
         redis=None):
@@ -35,6 +36,8 @@ class Experiment(object):
         self.name = name
         self.redis = redis
         self.alternatives = self.initialize_alternatives(alternatives)
+        self.segmentation_rules = segmentation_rules
+        self.segmenter = SegmenterFactory.create_from_rules(segmentation_rules)
         self.kpi = None
 
         # False here is a sentinal value for "not looked up yet"
@@ -50,6 +53,7 @@ class Experiment(object):
             'name': self.name,
             'period': period,
             'alternatives': {},
+            'segmentation_rules': self.segmentation_rules,
             'created_at': self.created_at,
             'traffic_fraction': self.traffic_fraction,
             'excluded_clients': self.excluded_clients(),
@@ -86,6 +90,7 @@ class Experiment(object):
             if is_new_record:
                 pipe.sadd(_key('e'), self.name)
                 pipe.hset(self.key(), 'created_at', datetime.now().strftime("%Y-%m-%d %H:%M"))
+                pipe.hset(self.key(), 'segmentation_rules', json.dumps(self.segmentation_rules))
                 # reverse here and use lpush to keep consistent with using lrange
                 for alternative in reversed(self.alternatives):
                     # pipe.lpush("{0}:alternatives".format(self.key()), alternative.name)
@@ -317,13 +322,12 @@ class Experiment(object):
             self._sequential_ids[client.client_id] = id_
         return self._sequential_ids[client.client_id]
 
-    def get_alternative(self, client, dt=None, prefetch=False):
+    def get_alternative(self, client, dt=None, prefetch=False, request=None):
         """Returns and records an alternative according to the following
         precedence:
           1. An existing alternative
           2. A server-chosen alternative
         """
-        print("getting alternative")
         if self.is_archived() or self.is_paused():
             return self.control
 
@@ -331,9 +335,8 @@ class Experiment(object):
             return self.control
 
         chosen_alternative = self.existing_alternative(client)
-        print("chosen alternative", chosen_alternative)
         if not chosen_alternative:
-            chosen_alternative, participate = self.choose_alternative(client)
+            chosen_alternative, participate = self.choose_alternative(client, request)
             if participate and not prefetch:
                 chosen_alternative.record_participation(client, dt=dt)
 
@@ -356,24 +359,21 @@ class Experiment(object):
             return None
 
         alts = self.alternatives
-        print("experiment alts", alts)
         keys = [_key("p:{0}:{1}:all".format(self.name, alt.name)) for alt in alts]
-        print("keys", keys)
         altkey = first_key_with_bit_set(keys=keys, args=[self.sequential_id(client)])
-        print("altkey", altkey)
         if altkey:
             idx = keys.index(decode_if_bytes(altkey))
             return Alternative(alts[idx].name, alts[idx].variations, self, redis=self.redis)
 
         return None
 
-    def choose_alternative(self, client):
+    def choose_alternative(self, client, request):
         rnd = random.random()
         if rnd >= self.traffic_fraction:
             self.exclude_client(client)
             return self.control, False
 
-        return self._uniform_choice(client), True
+        return self.segmenter.choose(request, self.alternatives), True
 
     # Ported from https://github.com/facebook/planout/blob/master/planout/ops/random.py
     def _uniform_choice(self, client):
@@ -422,10 +422,11 @@ class Experiment(object):
         
         return cls(experiment_name,
                    Experiment.load_alternatives(experiment_name, redis),
+                   Experiment.load_segmentation_rules(experiment_name, redis),
                    redis=redis)
 
     @classmethod
-    def create(cls, experiment_name, alternatives,
+    def create(cls, experiment_name, alternatives, segmentation_rules,
         traffic_fraction=None,
         redis=None):
 
@@ -437,7 +438,7 @@ class Experiment(object):
         if traffic_fraction is None:
             traffic_fraction = 1
 
-        experiment = cls(experiment_name, alternatives, redis=redis)
+        experiment = cls(experiment_name, alternatives, segmentation_rules, redis=redis)
         # TODO: I want to revisit this later.
         experiment.set_traffic_fraction(traffic_fraction)
         experiment.save()
@@ -493,6 +494,13 @@ class Experiment(object):
             decoded_alternatives[decode_if_bytes(name)] = json.loads(decode_if_bytes(variations))
         
         return decoded_alternatives
+    
+    @staticmethod
+    def load_segmentation_rules(experiment_name, redis=None):
+        key = _key("e:{0}".format(experiment_name))
+        segmentation_rules = redis.hget(key, 'segmentation_rules')
+
+        return json.loads(decode_if_bytes(segmentation_rules))
 
     @staticmethod
     def is_valid(experiment_name):
